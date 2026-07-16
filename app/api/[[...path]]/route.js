@@ -197,15 +197,32 @@ async function handleRoute(request, { params }) {
 
         await db.collection('calls').insertOne(call);
 
+        // Create TwiML with AI agent connection via Media Streams
         const response = createTwiMLResponse();
-        response.say({ voice: 'alice' }, 'Thank you for calling. This is an AI-powered assistant. How may I help you today?');
+        response.say({ 
+          voice: 'Polly.Joanna' 
+        }, 'Thank you for calling. Connecting you to our AI assistant now.');
         
-        response.record({
-          action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-complete`,
-          recordingStatusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-status`,
-          recordingStatusCallbackEvent: ['completed'],
-          maxLength: 300,
-          playBeep: true
+        // Connect directly to AI agent via Media Stream
+        const connect = response.connect();
+        const stream = connect.stream({
+          url: process.env.MEDIA_STREAM_URL || 'wss://callsync-ai.emergent.host/api/twilio/media-stream'
+        });
+        
+        // Pass call metadata to the stream
+        stream.parameter({
+          name: 'callSid',
+          value: callSid
+        });
+        
+        stream.parameter({
+          name: 'streamType',
+          value: 'ai-agent'
+        });
+        
+        stream.parameter({
+          name: 'direction',
+          value: 'inbound'
         });
 
         return new NextResponse(response.toString(), {
@@ -299,17 +316,23 @@ async function handleRoute(request, { params }) {
           { $set: { status: params.CallStatus, updatedAt: new Date() } }
         );
 
+        // Create TwiML with AI agent connection via Media Streams
         const response = createTwiMLResponse();
-        response.say({ voice: 'alice' }, 'Hello, this is an AI-powered assistant calling. I hope I am reaching you at a good time.');
-        response.pause({ length: 2 });
-        response.say({ voice: 'alice' }, 'Please leave your message after the beep.');
         
-        response.record({
-          action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-complete`,
-          recordingStatusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-status`,
-          maxLength: 300,
-          playBeep: true
+        // Greet the user
+        response.say({ 
+          voice: 'Polly.Joanna' 
+        }, 'Hello! Please press 1 to connect with our AI assistant, or press 2 to leave a message.');
+        
+        // Gather user input
+        const gather = response.gather({
+          numDigits: 1,
+          timeout: 10,
+          action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/gather-response`
         });
+        
+        // If no input, redirect to gather-response with default
+        response.redirect(`${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/gather-response?Digits=0`);
 
         return new NextResponse(response.toString(), {
           status: 200,
@@ -317,6 +340,69 @@ async function handleRoute(request, { params }) {
         });
       } catch (error) {
         console.error('Outgoing answer error:', error);
+        const response = createTwiMLResponse();
+        response.say({ voice: 'alice' }, 'An error occurred. Goodbye.');
+        response.hangup();
+        return new NextResponse(response.toString(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml' }
+        });
+      }
+    }
+
+    // Gather response - POST /api/twilio/voice/gather-response
+    if (route === '/twilio/voice/gather-response' && method === 'POST') {
+      try {
+        const formData = await request.formData();
+        const params = Object.fromEntries(formData);
+        const digits = params.Digits || new URL(request.url).searchParams.get('Digits');
+        const callSid = params.CallSid;
+
+        const response = createTwiMLResponse();
+
+        if (digits === '1') {
+          // User pressed 1 - Connect to AI agent via Media Streams
+          response.say({ voice: 'Polly.Joanna' }, 'Great! Connecting you to our AI assistant now.');
+          
+          // Connect to ElevenLabs AI via Media Stream
+          const connect = response.connect();
+          const stream = connect.stream({
+            url: process.env.MEDIA_STREAM_URL || 'wss://callsync-ai.emergent.host/api/twilio/media-stream'
+          });
+          
+          // Pass call metadata to the stream
+          stream.parameter({
+            name: 'callSid',
+            value: callSid
+          });
+          
+          stream.parameter({
+            name: 'streamType',
+            value: 'ai-agent'
+          });
+
+        } else if (digits === '2') {
+          // User pressed 2 - Leave a message
+          response.say({ voice: 'Polly.Joanna' }, 'Please leave your message after the beep.');
+          response.record({
+            action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-complete`,
+            recordingStatusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-status`,
+            maxLength: 300,
+            playBeep: true,
+            transcribe: true
+          });
+        } else {
+          // No input or invalid input
+          response.say({ voice: 'Polly.Joanna' }, 'We did not receive your input. Please try calling again. Goodbye.');
+          response.hangup();
+        }
+
+        return new NextResponse(response.toString(), {
+          status: 200,
+          headers: { 'Content-Type': 'text/xml' }
+        });
+      } catch (error) {
+        console.error('Gather response error:', error);
         const response = createTwiMLResponse();
         response.say({ voice: 'alice' }, 'An error occurred. Goodbye.');
         response.hangup();
