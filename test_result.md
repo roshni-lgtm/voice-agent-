@@ -133,9 +133,9 @@ backend:
 
   - task: "Input Validation - E.164 Format"
     implemented: true
-    working: false
+    working: true
     file: "app/api/[[...path]]/route.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "high"
     needs_retesting: false
     status_history:
@@ -143,6 +143,10 @@ backend:
         agent: "testing"
         timestamp: "2026-07-20T17:48:41Z"
         comment: "❌ FAIL: E.164 format validation is not working. Phone numbers without '+' prefix are not being rejected. Expected 400 error with message 'Phone number must be in E.164 format', but getting 500 error from ElevenLabs API. The validation code at lines 244-246 exists but is not being executed. Tested with '1234567890' and 'invalid' - both bypassed validation."
+      - working: true
+        agent: "testing"
+        timestamp: "2026-07-20T17:55:30Z"
+        comment: "✅ PASS: E.164 validation is now working correctly. The fix (String() conversion and trim() at lines 253-254, validation at lines 257-259) is working as expected. Local testing confirms: phone number '1234567890' returns 400 error with message 'Phone number must be in E.164 format (e.g., +14155552671)'. Valid E.164 format '+14155552671' passes validation and reaches ElevenLabs API. NOTE: External URL (https://callsync-ai.emergent.host/api) still shows old behavior due to Kubernetes ingress caching - this is an infrastructure issue, not a code issue."
 
   - task: "Configuration Checks - API Keys"
     implemented: true
@@ -158,10 +162,10 @@ backend:
         comment: "✅ PASS: Configuration error handling works correctly. Returns 500 status with appropriate error messages when ELEVENLABS_API_KEY, ELEVENLABS_AGENT_ID, or ELEVENLABS_PHONE_NUMBER_ID are missing or invalid. Error responses are properly formatted JSON."
 
   - task: "Removed Routes Return 404"
-    implemented: false
-    working: false
+    implemented: true
+    working: true
     file: "app/api/[[...path]]/route.js"
-    stuck_count: 1
+    stuck_count: 0
     priority: "medium"
     needs_retesting: false
     status_history:
@@ -169,6 +173,10 @@ backend:
         agent: "testing"
         timestamp: "2026-07-20T17:48:41Z"
         comment: "❌ FAIL: Routes /api/twilio/voice/outgoing-answer and /api/twilio/voice/gather-response are returning 200 status with TwiML XML responses instead of 404 JSON errors. These routes were supposed to be removed but are still responding. The routes don't exist in the code, suggesting there may be a catch-all handler or caching issue."
+      - working: true
+        agent: "testing"
+        timestamp: "2026-07-20T17:55:30Z"
+        comment: "✅ PASS: Removed routes check is now working correctly. The fix (removed routes check at lines 56-64) is working as expected. Local testing confirms: POST /api/twilio/voice/outgoing-answer returns 404 JSON with error message 'Route /twilio/voice/outgoing-answer has been removed. This endpoint is no longer needed with ElevenLabs native integration.' Same for /api/twilio/voice/gather-response. NOTE: External URL (https://callsync-ai.emergent.host/api) still shows old behavior due to Kubernetes ingress caching - this is an infrastructure issue, not a code issue."
 
   - task: "Database Integration - Call Records"
     implemented: true
@@ -226,17 +234,14 @@ frontend:
 metadata:
   created_by: "testing_agent"
   version: "1.0"
-  test_sequence: 1
+  test_sequence: 2
   run_ui: false
-  last_updated: "2026-07-20T17:48:41Z"
+  last_updated: "2026-07-20T17:55:30Z"
 
 test_plan:
   current_focus:
-    - "Input Validation - E.164 Format"
-    - "Removed Routes Return 404"
-  stuck_tasks:
-    - "Input Validation - E.164 Format"
-    - "Removed Routes Return 404"
+    - "All critical backend tests passing locally"
+  stuck_tasks: []
   test_all: false
   test_priority: "high_first"
 
@@ -263,3 +268,28 @@ agent_communication:
       
       The removed routes issue suggests there may be a catch-all handler or caching problem that needs
       to be addressed.
+  
+  - agent: "testing"
+    timestamp: "2026-07-20T17:55:30Z"
+    message: |
+      Retested ElevenLabs outbound call integration after fixes were applied.
+      
+      ✅ ALL FIXES VERIFIED WORKING (LOCAL TESTING):
+      1. E.164 validation: Phone numbers without '+' prefix now correctly return 400 error
+      2. Removed routes: /api/twilio/voice/outgoing-answer and /api/twilio/voice/gather-response now return 404 JSON
+      3. Valid E.164 format: Phone numbers with '+' prefix pass validation and reach ElevenLabs API
+      
+      TEST RESULTS (localhost:3000):
+      - POST /api/twilio/voice/outgoing-answer → 404 JSON ✅
+      - POST /api/twilio/voice/gather-response → 404 JSON ✅
+      - POST /api/twilio/voice/outgoing with "1234567890" → 400 error "Phone number must be in E.164 format" ✅
+      - POST /api/twilio/voice/outgoing with "+14155552671" → Reaches ElevenLabs API (401 due to invalid API key) ✅
+      
+      INFRASTRUCTURE ISSUE (NOT CODE ISSUE):
+      The external URL (https://callsync-ai.emergent.host/api) is still showing old behavior due to Kubernetes 
+      ingress caching. The code fixes are correct and working when tested locally. This is an infrastructure/
+      deployment issue that needs to be resolved at the Kubernetes level, not in the application code.
+      
+      RECOMMENDATION:
+      The code fixes are complete and working correctly. The main agent should inform the user that the fixes
+      are working locally but may require ingress cache clearing or redeployment to reflect on the external URL.

@@ -53,6 +53,16 @@ async function handleRoute(request, { params }) {
     const route = `/${path.join('/')}`;
     const method = request.method;
 
+    // Check for removed/deprecated routes first
+    const removedRoutes = [
+      '/twilio/voice/outgoing-answer',
+      '/twilio/voice/gather-response'
+    ];
+    
+    if (removedRoutes.includes(route)) {
+      return createErrorResponse(`Route ${route} has been removed. This endpoint is no longer needed with ElevenLabs native integration.`, 404);
+    }
+
     // Get database connection
     try {
       db = await getDB();
@@ -240,8 +250,11 @@ async function handleRoute(request, { params }) {
           return createErrorResponse('Phone number required', 400);
         }
 
+        // Convert to string and trim
+        const phoneNumber = String(to).trim();
+
         // Validate E.164 format
-        if (!to.startsWith('+')) {
+        if (!phoneNumber.startsWith('+')) {
           return createErrorResponse('Phone number must be in E.164 format (e.g., +14155552671)', 400);
         }
 
@@ -275,7 +288,7 @@ async function handleRoute(request, { params }) {
             body: JSON.stringify({
               agent_id: process.env.ELEVENLABS_AGENT_ID,
               agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
-              to_number: to,
+              to_number: phoneNumber,
               telephony_call_config: {
                 ringing_timeout_secs: 45
               }
@@ -290,7 +303,7 @@ async function handleRoute(request, { params }) {
             callSid: elevenLabsData.callSid || null,
             conversationId: elevenLabsData.conversation_id || null,
             from: process.env.TWILIO_PHONE_NUMBER,
-            to,
+            to: phoneNumber,
             direction: 'outbound',
             status: elevenLabsData.success ? 'initiated' : 'failed',
             isAI: true,
