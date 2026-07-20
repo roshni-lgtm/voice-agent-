@@ -190,6 +190,7 @@ async function handleRoute(request, { params }) {
           to,
           direction: 'inbound',
           status: callStatus,
+          isAI: true,
           startedAt: new Date(),
           createdAt: new Date(),
           updatedAt: new Date()
@@ -197,32 +198,20 @@ async function handleRoute(request, { params }) {
 
         await db.collection('calls').insertOne(call);
 
-        // Create TwiML with AI agent connection via Media Streams
+        // ElevenLabs handles the AI conversation natively through Twilio
+        // Just return simple TwiML to acknowledge the call
         const response = createTwiMLResponse();
         response.say({ 
           voice: 'Polly.Joanna' 
-        }, 'Thank you for calling. Connecting you to our AI assistant now.');
+        }, 'Thank you for calling. Please hold while we connect you.');
         
-        // Connect directly to AI agent via Media Stream
-        const connect = response.connect();
-        const stream = connect.stream({
-          url: process.env.MEDIA_STREAM_URL || 'wss://callsync-ai.emergent.host/api/twilio/media-stream'
-        });
-        
-        // Pass call metadata to the stream
-        stream.parameter({
-          name: 'callSid',
-          value: callSid
-        });
-        
-        stream.parameter({
-          name: 'streamType',
-          value: 'ai-agent'
-        });
-        
-        stream.parameter({
-          name: 'direction',
-          value: 'inbound'
+        // Record the call for later transcription and analysis
+        response.record({
+          action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-complete`,
+          recordingStatusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-status`,
+          recordingStatusCallbackEvent: ['completed'],
+          maxLength: 300,
+          transcribe: true
         });
 
         return new NextResponse(response.toString(), {
@@ -245,171 +234,97 @@ async function handleRoute(request, { params }) {
     if (route === '/twilio/voice/outgoing' && method === 'POST') {
       try {
         const body = await request.json();
-        const { to, message = 'Hello, this is an AI-powered call.' } = body;
+        const { to } = body;
 
         if (!to) {
           return createErrorResponse('Phone number required', 400);
         }
 
-        const twilioClient = getTwilioClient();
-        if (!twilioClient) {
-          return createErrorResponse('Twilio not configured', 500, {
-            message: 'Twilio credentials are missing. Please configure TWILIO_ACCOUNT_SID and TWILIO_AUTH_TOKEN.'
+        // Validate E.164 format
+        if (!to.startsWith('+')) {
+          return createErrorResponse('Phone number must be in E.164 format (e.g., +14155552671)', 400);
+        }
+
+        // Check ElevenLabs configuration
+        if (!process.env.ELEVENLABS_API_KEY) {
+          return createErrorResponse('ElevenLabs not configured', 500, {
+            message: 'ELEVENLABS_API_KEY is missing. Please configure it in environment variables.'
           });
         }
 
-        const from = getTwilioPhoneNumber();
-        if (!from) {
-          return createErrorResponse('Twilio phone number not configured', 500);
+        if (!process.env.ELEVENLABS_AGENT_ID) {
+          return createErrorResponse('ElevenLabs agent not configured', 500, {
+            message: 'ELEVENLABS_AGENT_ID is missing. Please configure it in environment variables.'
+          });
         }
-        
+
+        if (!process.env.ELEVENLABS_PHONE_NUMBER_ID) {
+          return createErrorResponse('ElevenLabs phone number not configured', 500, {
+            message: 'ELEVENLABS_PHONE_NUMBER_ID is missing. Please configure it in environment variables.'
+          });
+        }
+
         try {
-          const call = await twilioClient.calls.create({
-            from,
-            to,
-            url: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/outgoing-answer`,
-            statusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/status-callback`,
-            statusCallbackEvent: ['initiated', 'ringing', 'answered', 'completed'],
-            record: true
+          // Use ElevenLabs native outbound call API
+          const elevenLabsResponse = await fetch('https://api.elevenlabs.io/v1/convai/twilio/outbound-call', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'xi-api-key': process.env.ELEVENLABS_API_KEY
+            },
+            body: JSON.stringify({
+              agent_id: process.env.ELEVENLABS_AGENT_ID,
+              agent_phone_number_id: process.env.ELEVENLABS_PHONE_NUMBER_ID,
+              to_number: to,
+              telephony_call_config: {
+                ringing_timeout_secs: 45
+              }
+            })
           });
 
+          const elevenLabsData = await elevenLabsResponse.json();
+
+          // Create call record in database
           const callRecord = {
             id: uuidv4(),
-            callSid: call.sid,
-            from,
+            callSid: elevenLabsData.callSid || null,
+            conversationId: elevenLabsData.conversation_id || null,
+            from: process.env.TWILIO_PHONE_NUMBER,
             to,
             direction: 'outbound',
-            status: call.status,
+            status: elevenLabsData.success ? 'initiated' : 'failed',
+            isAI: true,
             startedAt: new Date(),
             createdAt: new Date(),
-            updatedAt: new Date()
+            updatedAt: new Date(),
+            elevenLabsResponse: elevenLabsData
           };
 
           await db.collection('calls').insertOne(callRecord);
 
+          if (!elevenLabsResponse.ok) {
+            return createErrorResponse('ElevenLabs API call failed', elevenLabsResponse.status, {
+              message: elevenLabsData.message || 'Failed to place call',
+              details: elevenLabsData
+            });
+          }
+
           return createSuccessResponse({
-            callSid: call.sid,
-            status: call.status,
+            success: elevenLabsData.success,
+            message: elevenLabsData.message,
+            callSid: elevenLabsData.callSid,
+            conversationId: elevenLabsData.conversation_id,
             callId: callRecord.id
           });
-        } catch (twilioError) {
-          console.error('Twilio API error:', twilioError);
-          return createErrorResponse('Failed to initiate call', 500, {
-            message: twilioError.message || 'Twilio API call failed'
+        } catch (apiError) {
+          console.error('ElevenLabs API error:', apiError);
+          return createErrorResponse('Failed to place call', 500, {
+            message: apiError.message || 'ElevenLabs API call failed'
           });
         }
       } catch (error) {
         console.error('Outgoing call error:', error);
         return createErrorResponse('Failed to process outgoing call', 500, { message: error.message });
-      }
-    }
-
-    // Outgoing call answer - POST /api/twilio/voice/outgoing-answer
-    if (route === '/twilio/voice/outgoing-answer' && method === 'POST') {
-      try {
-        const formData = await request.formData();
-        const params = Object.fromEntries(formData);
-        const callSid = params.CallSid;
-
-        await db.collection('calls').updateOne(
-          { callSid },
-          { $set: { status: params.CallStatus, updatedAt: new Date() } }
-        );
-
-        // Create TwiML with AI agent connection via Media Streams
-        const response = createTwiMLResponse();
-        
-        // Greet the user
-        response.say({ 
-          voice: 'Polly.Joanna' 
-        }, 'Hello! Please press 1 to connect with our AI assistant, or press 2 to leave a message.');
-        
-        // Gather user input
-        const gather = response.gather({
-          numDigits: 1,
-          timeout: 10,
-          action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/gather-response`
-        });
-        
-        // If no input, redirect to gather-response with default
-        response.redirect(`${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/gather-response?Digits=0`);
-
-        return new NextResponse(response.toString(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/xml' }
-        });
-      } catch (error) {
-        console.error('Outgoing answer error:', error);
-        const response = createTwiMLResponse();
-        response.say({ voice: 'alice' }, 'An error occurred. Goodbye.');
-        response.hangup();
-        return new NextResponse(response.toString(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/xml' }
-        });
-      }
-    }
-
-    // Gather response - POST /api/twilio/voice/gather-response
-    if (route === '/twilio/voice/gather-response' && method === 'POST') {
-      try {
-        const formData = await request.formData();
-        const params = Object.fromEntries(formData);
-        const digits = params.Digits || new URL(request.url).searchParams.get('Digits');
-        const callSid = params.CallSid;
-
-        const response = createTwiMLResponse();
-
-        if (digits === '1') {
-          // User pressed 1 - Connect to AI agent via Media Streams
-          response.say({ voice: 'Polly.Joanna' }, 'Great! Connecting you to our AI assistant now.');
-          
-          // Connect to ElevenLabs AI via Media Stream
-          const connect = response.connect();
-          const stream = connect.stream({
-            url: process.env.MEDIA_STREAM_URL || 'wss://callsync-ai.emergent.host/api/twilio/media-stream'
-          });
-          
-          // Pass call metadata to the stream
-          stream.parameter({
-            name: 'callSid',
-            value: callSid
-          });
-          
-          stream.parameter({
-            name: 'streamType',
-            value: 'ai-agent'
-          });
-
-        } else if (digits === '2') {
-          // User pressed 2 - Leave a message
-          response.say({ voice: 'Polly.Joanna' }, 'Please leave your message after the beep.');
-          response.record({
-            action: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-complete`,
-            recordingStatusCallback: `${process.env.NEXT_PUBLIC_BASE_URL}/api/twilio/voice/recording-status`,
-            maxLength: 300,
-            playBeep: true,
-            transcribe: true
-          });
-        } else {
-          // No input or invalid input
-          response.say({ voice: 'Polly.Joanna' }, 'We did not receive your input. Please try calling again. Goodbye.');
-          response.hangup();
-        }
-
-        return new NextResponse(response.toString(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/xml' }
-        });
-      } catch (error) {
-        console.error('Gather response error:', error);
-        const response = createTwiMLResponse();
-        response.say({ voice: 'alice' }, 'An error occurred. Goodbye.');
-        response.hangup();
-        return new NextResponse(response.toString(), {
-          status: 200,
-          headers: { 'Content-Type': 'text/xml' }
-        });
       }
     }
 
